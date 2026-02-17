@@ -6,14 +6,16 @@ import {
   enrichAllProgressively,
 } from "@/lib/metaplex";
 import type { NFTData } from "@/lib/metaplex";
-import { RPC_ENDPOINT } from "@/lib/constants";
 
 export interface OffChainProgress {
   loaded: number;
   total: number;
 }
 
-export function useNFTsByUpdateAuthority(address: string | null) {
+export function useNFTsByUpdateAuthority(
+  address: string | null,
+  rpcEndpoint: string
+) {
   const [nfts, setNfts] = useState<NFTData[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadingOffChain, setLoadingOffChain] = useState(false);
@@ -38,18 +40,21 @@ export function useNFTsByUpdateAuthority(address: string | null) {
     const controller = new AbortController();
     abortRef.current = controller;
 
+    setNfts([]);
     setLoading(true);
     setLoadingOffChain(false);
     setError(null);
 
-    fetchMetadataAccounts(address, RPC_ENDPOINT)
+    fetchMetadataAccounts(address, rpcEndpoint)
       .then(async (rawNfts) => {
         if (controller.signal.aborted) return;
 
         // phase 1 done — show on-chain data immediately
         setNfts(rawNfts);
         setLoading(false);
-        console.log(`Showing ${rawNfts.length} NFTs (on-chain), fetching off-chain data...`);
+        console.log(
+          `Showing ${rawNfts.length} NFTs (on-chain), fetching off-chain data...`
+        );
 
         if (rawNfts.length === 0) return;
 
@@ -84,7 +89,7 @@ export function useNFTsByUpdateAuthority(address: string | null) {
     return () => {
       controller.abort();
     };
-  }, [address]);
+  }, [address, rpcEndpoint]);
 
   return { nfts, loading, loadingOffChain, offChainProgress, error };
 }
