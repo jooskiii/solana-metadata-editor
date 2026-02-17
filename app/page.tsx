@@ -1,10 +1,22 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { WalletButton } from "@/components/WalletButton";
+import { NFTGallery } from "@/components/NFTGallery";
 import { useWalletStatus } from "@/hooks/useWalletStatus";
+import { useNFTsByUpdateAuthority } from "@/hooks/useNFTsByUpdateAuthority";
 
 export default function Home() {
   const { connected, address, isReady } = useWalletStatus();
+  const { nfts, loading, error } = useNFTsByUpdateAuthority(
+    connected ? address : null
+  );
+  const [selectedMint, setSelectedMint] = useState<string | null>(null);
+
+  // clear selection when wallet changes
+  useEffect(() => {
+    setSelectedMint(null);
+  }, [address]);
 
   return (
     <main className="mx-auto max-w-[800px] px-6 py-16">
@@ -21,16 +33,13 @@ export default function Home() {
 
       {isReady && connected && address && (
         <div className="mt-12">
-          <p className="text-foreground/60 text-sm">
-            connected as{" "}
-            <span className="font-mono text-foreground">
-              {address.slice(0, 4)}...{address.slice(-4)}
-            </span>
-            {" "}on devnet
-          </p>
-          <p className="text-foreground/40 text-sm mt-4">
-            nft metadata editing coming soon.
-          </p>
+          <NFTGallery
+            nfts={nfts}
+            loading={loading}
+            error={error}
+            selectedMint={selectedMint}
+            onSelect={setSelectedMint}
+          />
         </div>
       )}
     </main>
