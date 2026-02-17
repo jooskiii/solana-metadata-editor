@@ -3,6 +3,7 @@
 import { useState, useMemo, useEffect } from "react";
 import { NFTCard } from "./NFTCard";
 import type { NFTData } from "@/lib/metaplex";
+import type { OffChainProgress } from "@/hooks/useNFTsByUpdateAuthority";
 
 type SortOption = "newest" | "oldest" | "broken" | "title" | "collection";
 
@@ -26,6 +27,8 @@ function getSavedSort(): SortOption {
 interface NFTGalleryProps {
   nfts: NFTData[];
   loading: boolean;
+  loadingOffChain: boolean;
+  offChainProgress: OffChainProgress;
   error: string | null;
   selectedMint: string | null;
   onSelect: (mint: string | null) => void;
@@ -34,6 +37,8 @@ interface NFTGalleryProps {
 export function NFTGallery({
   nfts,
   loading,
+  loadingOffChain,
+  offChainProgress,
   error,
   selectedMint,
   onSelect,
@@ -106,10 +111,17 @@ export function NFTGallery({
     );
   }
 
-  const brokenCount = nfts.filter((n) => n.uriBroken).length;
+  const brokenCount = nfts.filter((n) => n.offChainLoaded && n.uriBroken).length;
 
   return (
     <div>
+      {/* progress */}
+      {loadingOffChain && (
+        <p className="text-sm text-foreground/50 mb-4">
+          loading metadata... {offChainProgress.loaded}/{offChainProgress.total}
+        </p>
+      )}
+
       {/* controls */}
       <div className="flex flex-wrap gap-3 items-center mb-4">
         <input

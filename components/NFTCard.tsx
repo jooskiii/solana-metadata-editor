@@ -16,7 +16,7 @@ export function NFTCard({ nft, selected, showImage, onSelect }: NFTCardProps) {
   const [imageError, setImageError] = useState(false);
 
   const shortMint = `${nft.mint.slice(0, 4)}...${nft.mint.slice(-4)}`;
-  const isBroken = nft.uriBroken || imageError;
+  const isBroken = nft.offChainLoaded && (nft.uriBroken || imageError);
 
   return (
     <div
@@ -30,8 +30,10 @@ export function NFTCard({ nft, selected, showImage, onSelect }: NFTCardProps) {
       } hover:opacity-80`}
     >
       {showImage && (
-        <div className="w-full aspect-square mb-3 bg-foreground/5 flex items-center justify-center overflow-hidden">
-          {nft.image && !imageError ? (
+        <div className="w-full aspect-square mb-3 bg-foreground/5 flex items-center justify-center overflow-hidden relative">
+          {!nft.offChainLoaded ? (
+            <span className="text-xs text-foreground/30">loading...</span>
+          ) : nft.image && !imageError ? (
             <>
               {!imageLoaded && (
                 <span className="text-xs text-foreground/30 absolute">

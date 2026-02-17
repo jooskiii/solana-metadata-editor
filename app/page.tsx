@@ -8,9 +8,8 @@ import { useNFTsByUpdateAuthority } from "@/hooks/useNFTsByUpdateAuthority";
 
 export default function Home() {
   const { connected, address, isReady } = useWalletStatus();
-  const { nfts, loading, error } = useNFTsByUpdateAuthority(
-    connected ? address : null
-  );
+  const { nfts, loading, loadingOffChain, offChainProgress, error } =
+    useNFTsByUpdateAuthority(connected ? address : null);
   const [selectedMint, setSelectedMint] = useState<string | null>(null);
 
   // clear selection when wallet changes
@@ -36,6 +35,8 @@ export default function Home() {
           <NFTGallery
             nfts={nfts}
             loading={loading}
+            loadingOffChain={loadingOffChain}
+            offChainProgress={offChainProgress}
             error={error}
             selectedMint={selectedMint}
             onSelect={setSelectedMint}

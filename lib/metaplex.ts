@@ -1,5 +1,6 @@
 const TOKEN_METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
 const B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const OFFCHAIN_BATCH_SIZE = 10;
 
 function base58Encode(bytes: Uint8Array): string {
   let zeros = 0;
@@ -107,6 +108,7 @@ export interface NFTData {
   description: string | null;
   collection: string | null;
   uriBroken: boolean;
+  offChainLoaded: boolean;
 }
 
 async function fetchOffChainMetadata(
@@ -131,7 +133,8 @@ async function fetchOffChainMetadata(
   }
 }
 
-export async function fetchNFTsByUpdateAuthority(
+/** Phase 1: Fetch on-chain metadata accounts via getProgramAccounts. */
+export async function fetchMetadataAccounts(
   walletAddress: string,
   rpcEndpoint: string
 ): Promise<NFTData[]> {
@@ -167,55 +170,97 @@ export async function fetchNFTsByUpdateAuthority(
   }> = result.result || [];
   console.log(`Found ${accounts.length} metadata accounts`);
 
-  const rawMetadata: RawMetadata[] = [];
+  const nfts: NFTData[] = [];
   for (const account of accounts) {
     try {
       const base64Data = account.account.data[0];
       const data = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
       const parsed = parseMetadataAccount(data);
-      if (parsed) rawMetadata.push(parsed);
+      if (parsed) {
+        nfts.push({
+          mint: parsed.mint,
+          name: parsed.name || "Unnamed",
+          symbol: parsed.symbol || "",
+          uri: parsed.uri,
+          updateAuthority: parsed.updateAuthority,
+          image: null,
+          description: null,
+          collection: null,
+          uriBroken: false,
+          offChainLoaded: false,
+        });
+      }
     } catch (err) {
       console.warn("Failed to parse metadata account:", account.pubkey, err);
     }
   }
 
-  console.log(
-    `Parsed ${rawMetadata.length} metadata accounts, fetching off-chain data...`
-  );
-
-  const nfts: NFTData[] = await Promise.all(
-    rawMetadata.map(async (raw): Promise<NFTData> => {
-      const { data: offChain, broken: uriBroken } =
-        await fetchOffChainMetadata(raw.uri);
-
-      let collection: string | null = null;
-      if (offChain?.collection) {
-        if (typeof offChain.collection === "string") {
-          collection = offChain.collection;
-        } else if (offChain.collection.name) {
-          collection = offChain.collection.name;
-        }
-      }
-
-      const image = offChain?.image ? resolveGatewayUrl(offChain.image) : null;
-
-      return {
-        mint: raw.mint,
-        name: raw.name || offChain?.name || "Unnamed",
-        symbol: raw.symbol || offChain?.symbol || "",
-        uri: raw.uri,
-        updateAuthority: raw.updateAuthority,
-        image,
-        description: offChain?.description || null,
-        collection,
-        uriBroken,
-      };
-    })
-  );
-
-  console.log(
-    `Loaded ${nfts.length} NFTs (${nfts.filter((n) => n.uriBroken).length} with broken URIs)`
-  );
-
+  console.log(`Parsed ${nfts.length} metadata accounts`);
   return nfts;
+}
+
+/** Phase 2: Enrich a single NFT with off-chain metadata. */
+export async function enrichWithOffChainData(nft: NFTData): Promise<NFTData> {
+  const { data: offChain, broken: uriBroken } = await fetchOffChainMetadata(
+    nft.uri
+  );
+
+  let collection: string | null = null;
+  if (offChain?.collection) {
+    if (typeof offChain.collection === "string") {
+      collection = offChain.collection;
+    } else if (offChain.collection.name) {
+      collection = offChain.collection.name;
+    }
+  }
+
+  const image = offChain?.image ? resolveGatewayUrl(offChain.image) : null;
+
+  return {
+    ...nft,
+    name: nft.name || offChain?.name || "Unnamed",
+    symbol: nft.symbol || offChain?.symbol || "",
+    image,
+    description: offChain?.description || null,
+    collection,
+    uriBroken,
+    offChainLoaded: true,
+  };
+}
+
+/**
+ * Phase 2 runner: enrich NFTs in batches, calling onProgress after each batch.
+ * Returns when all batches are done or signal is aborted.
+ */
+export async function enrichAllProgressively(
+  nfts: NFTData[],
+  onProgress: (updated: NFTData[], loaded: number, total: number) => void,
+  signal: AbortSignal
+): Promise<void> {
+  const total = nfts.length;
+  const results = [...nfts];
+  let loaded = 0;
+
+  for (let i = 0; i < total; i += OFFCHAIN_BATCH_SIZE) {
+    if (signal.aborted) return;
+
+    const batchEnd = Math.min(i + OFFCHAIN_BATCH_SIZE, total);
+    const batch = nfts.slice(i, batchEnd);
+
+    const enriched = await Promise.all(batch.map(enrichWithOffChainData));
+
+    if (signal.aborted) return;
+
+    for (let j = 0; j < enriched.length; j++) {
+      results[i + j] = enriched[j];
+    }
+    loaded += enriched.length;
+
+    onProgress([...results], loaded, total);
+  }
+
+  const brokenCount = results.filter((n) => n.uriBroken).length;
+  console.log(
+    `Loaded ${total} NFTs (${brokenCount} with broken URIs)`
+  );
 }
