@@ -13,4 +13,5 @@ export const NETWORK_OPTIONS: Record<Network, { label: string; rpc: string }> = 
 
 export const DEFAULT_NETWORK: Network = "mainnet-beta";
 export const NETWORK_STORAGE_KEY = "solana-network";
+export const CUSTOM_RPC_STORAGE_KEY = "solana-custom-rpc";
 export const ERROR_DISPLAY_MS = 5000;

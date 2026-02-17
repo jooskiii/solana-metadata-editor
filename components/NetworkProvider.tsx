@@ -7,6 +7,8 @@ import type { Network } from "@/lib/constants";
 interface NetworkContextValue {
   network: Network;
   setNetwork: (n: Network) => void;
+  customRpc: string;
+  setCustomRpc: (rpc: string) => void;
   rpcEndpoint: string;
   label: string;
   isReady: boolean;
@@ -23,6 +25,7 @@ export function NetworkProvider({ children }: { children: React.ReactNode }) {
 
 export function useNetworkContext() {
   const ctx = useContext(NetworkContext);
-  if (!ctx) throw new Error("useNetworkContext must be used within NetworkProvider");
+  if (!ctx)
+    throw new Error("useNetworkContext must be used within NetworkProvider");
   return ctx;
 }
