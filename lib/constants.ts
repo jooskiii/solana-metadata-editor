@@ -3,7 +3,9 @@ export type Network = "mainnet-beta" | "devnet";
 export const NETWORK_OPTIONS: Record<Network, { label: string; rpc: string }> = {
   "mainnet-beta": {
     label: "mainnet",
-    rpc: "https://api.mainnet-beta.solana.com",
+    rpc:
+      process.env.NEXT_PUBLIC_MAINNET_RPC ||
+      "https://api.mainnet-beta.solana.com",
   },
   devnet: {
     label: "devnet",

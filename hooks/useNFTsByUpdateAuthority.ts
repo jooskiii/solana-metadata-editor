@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useRef } from "react";
 import {
+  fetchNFTsViaDAS,
+  isDASUnsupported,
   fetchMetadataAccounts,
   enrichAllProgressively,
 } from "@/lib/metaplex";
@@ -45,11 +47,33 @@ export function useNFTsByUpdateAuthority(
     setLoadingOffChain(false);
     setError(null);
 
-    fetchMetadataAccounts(address, rpcEndpoint)
-      .then(async (rawNfts) => {
+    (async () => {
+      try {
+        // Try DAS API first (faster, includes off-chain data)
+        try {
+          console.log("Trying DAS API...");
+          const dasNfts = await fetchNFTsViaDAS(address, rpcEndpoint);
+          if (controller.signal.aborted) return;
+
+          setNfts(dasNfts);
+          setLoading(false);
+          console.log(`DAS returned ${dasNfts.length} NFTs`);
+          return;
+        } catch (dasErr) {
+          if (controller.signal.aborted) return;
+
+          if (isDASUnsupported(dasErr)) {
+            console.log("DAS not supported, falling back to getProgramAccounts...");
+          } else {
+            console.warn("DAS error, falling back to getProgramAccounts:", dasErr);
+          }
+        }
+
+        // Fallback: getProgramAccounts (two-phase loading)
+        const rawNfts = await fetchMetadataAccounts(address, rpcEndpoint);
         if (controller.signal.aborted) return;
 
-        // phase 1 done — show on-chain data immediately
+        // Phase 1 done — show on-chain data immediately
         setNfts(rawNfts);
         setLoading(false);
         console.log(
@@ -58,7 +82,7 @@ export function useNFTsByUpdateAuthority(
 
         if (rawNfts.length === 0) return;
 
-        // phase 2 — enrich with off-chain data in batches
+        // Phase 2 — enrich with off-chain data in batches
         setLoadingOffChain(true);
         setOffChainProgress({ loaded: 0, total: rawNfts.length });
 
@@ -74,8 +98,7 @@ export function useNFTsByUpdateAuthority(
         if (!controller.signal.aborted) {
           setLoadingOffChain(false);
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!controller.signal.aborted) {
           const msg =
             err instanceof Error ? err.message : "Failed to load NFTs";
@@ -84,7 +107,8 @@ export function useNFTsByUpdateAuthority(
           setLoadingOffChain(false);
           console.error("Error loading NFTs:", err);
         }
-      });
+      }
+    })();
 
     return () => {
       controller.abort();
