@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+:root {
+  --background: #ffffff;
+  --foreground: #1a1a1a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, sans-serif;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
