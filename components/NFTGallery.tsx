@@ -32,6 +32,7 @@ interface NFTGalleryProps {
   error: string | null;
   selectedMint: string | null;
   onSelect: (mint: string | null) => void;
+  onEdit: (nft: NFTData) => void;
 }
 
 export function NFTGallery({
@@ -42,6 +43,7 @@ export function NFTGallery({
   error,
   selectedMint,
   onSelect,
+  onEdit,
 }: NFTGalleryProps) {
   const [sort, setSort] = useState<SortOption>("newest");
   const [search, setSearch] = useState("");
@@ -191,7 +193,13 @@ export function NFTGallery({
       {/* edit button */}
       {selectedMint && (
         <div className="mt-8">
-          <button className="border border-foreground/20 px-4 py-2 text-sm hover:opacity-70">
+          <button
+            onClick={() => {
+              const selected = nfts.find((n) => n.mint === selectedMint);
+              if (selected) onEdit(selected);
+            }}
+            className="border border-foreground/20 px-4 py-2 text-sm hover:opacity-70"
+          >
             edit metadata
           </button>
         </div>

@@ -54,6 +54,32 @@ export function resolveGatewayUrl(url: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Full off-chain JSON fetch (for the metadata editor)
+// ---------------------------------------------------------------------------
+
+export async function fetchFullOffChainJson(
+  uri: string
+): Promise<Record<string, unknown> | null> {
+  if (!uri) return null;
+
+  const resolved = resolveGatewayUrl(uri);
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    const response = await fetch(resolved, { signal: controller.signal });
+    clearTimeout(timeout);
+
+    if (!response.ok) return null;
+
+    const data = (await response.json()) as Record<string, unknown>;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // DAS API (Digital Asset Standard) — preferred path
 // ---------------------------------------------------------------------------
 

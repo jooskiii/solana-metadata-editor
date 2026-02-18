@@ -3,10 +3,12 @@
 import { useState, useEffect } from "react";
 import { WalletButton } from "@/components/WalletButton";
 import { NFTGallery } from "@/components/NFTGallery";
+import { MetadataEditor } from "@/components/MetadataEditor";
 import { NetworkSwitcher } from "@/components/NetworkSwitcher";
 import { useNetworkContext } from "@/components/NetworkProvider";
 import { useWalletStatus } from "@/hooks/useWalletStatus";
 import { useNFTsByUpdateAuthority } from "@/hooks/useNFTsByUpdateAuthority";
+import type { NFTData } from "@/lib/metaplex";
 
 export default function Home() {
   const { connected, address, isReady } = useWalletStatus();
@@ -14,10 +16,12 @@ export default function Home() {
   const { nfts, loading, loadingOffChain, offChainProgress, error } =
     useNFTsByUpdateAuthority(connected ? address : null, rpcEndpoint);
   const [selectedMint, setSelectedMint] = useState<string | null>(null);
+  const [editingNft, setEditingNft] = useState<NFTData | null>(null);
 
-  // clear selection when wallet or network changes
+  // clear selection and editor when wallet or network changes
   useEffect(() => {
     setSelectedMint(null);
+    setEditingNft(null);
   }, [address, rpcEndpoint]);
 
   return (
@@ -46,7 +50,16 @@ export default function Home() {
             error={error}
             selectedMint={selectedMint}
             onSelect={setSelectedMint}
+            onEdit={(nft) => setEditingNft(nft)}
           />
+          {editingNft && (
+            <div className="mt-8">
+              <MetadataEditor
+                nft={editingNft}
+                onClose={() => setEditingNft(null)}
+              />
+            </div>
+          )}
         </div>
       )}
     </main>
