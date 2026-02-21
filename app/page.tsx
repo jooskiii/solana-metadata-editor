@@ -13,7 +13,7 @@ import type { NFTData } from "@/lib/metaplex";
 export default function Home() {
   const { connected, address, isReady } = useWalletStatus();
   const { rpcEndpoint, label } = useNetworkContext();
-  const { nfts, loading, loadingOffChain, offChainProgress, error } =
+  const { nfts, loading, loadingOffChain, offChainProgress, error, refresh } =
     useNFTsByUpdateAuthority(connected ? address : null, rpcEndpoint);
   const [selectedMint, setSelectedMint] = useState<string | null>(null);
   const [editingNft, setEditingNft] = useState<NFTData | null>(null);
@@ -57,6 +57,7 @@ export default function Home() {
               <MetadataEditor
                 nft={editingNft}
                 onClose={() => setEditingNft(null)}
+                onRefresh={refresh}
               />
             </div>
           )}

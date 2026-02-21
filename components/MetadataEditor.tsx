@@ -2,6 +2,9 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { CopyText } from "./CopyText";
+import { useNetworkContext } from "./NetworkProvider";
+import { useSendTransaction } from "@solana/react-hooks";
+import { useWalletStatus } from "@/hooks/useWalletStatus";
 import type { NFTData } from "@/lib/metaplex";
 import { fetchFullOffChainJson } from "@/lib/metaplex";
 import {
@@ -13,10 +16,33 @@ import {
   validateCreatorShares,
   validateMetadataJson,
 } from "@/lib/validation";
+import {
+  DEFAULT_COMPUTE_UNITS,
+  PRIORITY_FEE_BY_NETWORK,
+  CONFIRMATION_TIMEOUT_MS,
+  CONFIRMATION_POLL_MS,
+} from "@/lib/constants";
+import { fetchOnChainMetadata } from "@/lib/metadata-account";
+import type { OnChainMetadata } from "@/lib/metadata-account";
+import {
+  buildUpdateMetadataV2Instruction,
+  mergeCreators,
+  classifyTransactionError,
+  estimateTransactionFee,
+  pollConfirmation,
+  getExplorerUrl,
+  addTransactionToHistory,
+  getTransactionHistory,
+  type TransactionState,
+  type TransactionError,
+  type TransactionHistoryEntry,
+} from "@/lib/transaction";
+import { deriveMetadataPDA } from "@/lib/metadata-account";
 
 interface MetadataEditorProps {
   nft: NFTData;
   onClose: () => void;
+  onRefresh?: () => void;
 }
 
 interface Creator {
@@ -40,7 +66,11 @@ interface FieldErrors {
   creatorAddresses?: Record<number, string | null>;
 }
 
-export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
+export function MetadataEditor({ nft, onClose, onRefresh }: MetadataEditorProps) {
+  const { network, rpcEndpoint } = useNetworkContext();
+  const { address: walletAddress, connected } = useWalletStatus();
+  const { send, isSending, reset: resetSend } = useSendTransaction();
+
   // loading state
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -70,7 +100,35 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
   const [errors, setErrors] = useState<FieldErrors>({});
   const [jsonCopied, setJsonCopied] = useState(false);
 
+  // transaction state
+  const [txState, setTxState] = useState<TransactionState>("idle");
+  const [txError, setTxError] = useState<TransactionError | null>(null);
+  const [txSignature, setTxSignature] = useState<string | null>(null);
+  const [onChainMeta, setOnChainMeta] = useState<OnChainMetadata | null>(null);
+  const [txHistory, setTxHistory] = useState<TransactionHistoryEntry[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [jsonApplied, setJsonApplied] = useState(false);
+
+  // advanced options
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const customRpcInUse = !!(
+    network !== "mainnet-beta" && network !== "devnet"
+  );
+  const defaultPriorityFee = customRpcInUse
+    ? PRIORITY_FEE_BY_NETWORK.custom
+    : PRIORITY_FEE_BY_NETWORK[network];
+  const [priorityFee, setPriorityFee] = useState(defaultPriorityFee);
+  const [skipPreflight, setSkipPreflight] = useState(false);
+  const [commitment, setCommitment] = useState<"confirmed" | "finalized">(
+    "confirmed"
+  );
+
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // load transaction history on mount
+  useEffect(() => {
+    setTxHistory(getTransactionHistory());
+  }, []);
 
   // fetch full off-chain JSON on mount
   useEffect(() => {
@@ -160,6 +218,39 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
 
     return !hasFieldError && !hasAddrError;
   }, [name, symbol, imageUrl, externalUrl, sellerFeeBasisPoints, creators]);
+
+  // pre-transaction validation
+  const runPreTransactionValidation = useCallback((): string[] => {
+    const issues: string[] = [];
+
+    if (!connected || !walletAddress) {
+      issues.push("Wallet is not connected");
+    }
+
+    const uriError = validateUrl(newUri, true);
+    if (uriError) issues.push(`New URI: ${uriError}`);
+
+    const nameErr = validateName(name);
+    if (nameErr) issues.push(`Name: ${nameErr}`);
+
+    const symErr = validateSymbol(symbol);
+    if (symErr) issues.push(`Symbol: ${symErr}`);
+
+    const feeErr = validateSellerFee(sellerFeeBasisPoints);
+    if (feeErr) issues.push(`Seller fee: ${feeErr}`);
+
+    if (creators.length > 0) {
+      const shareErr = validateCreatorShares(creators);
+      if (shareErr) issues.push(`Creators: ${shareErr}`);
+
+      creators.forEach((c, i) => {
+        const addrErr = validateCreatorAddress(c.address);
+        if (addrErr) issues.push(`Creator ${i + 1}: ${addrErr}`);
+      });
+    }
+
+    return issues;
+  }, [connected, walletAddress, newUri, name, symbol, sellerFeeBasisPoints, creators]);
 
   // changes diff
   const getChanges = useCallback((): Array<{
@@ -292,6 +383,7 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
     setGeneratedJson(text);
     setJsonManualText(text);
     setJsonErrors([]);
+    setJsonApplied(false);
   };
 
   const handleJsonManualChange = (text: string) => {
@@ -373,11 +465,16 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
     setJsonErrors([]);
     setNewUri("");
     setErrors({});
+    setTxState("idle");
+    setTxError(null);
+    setTxSignature(null);
+    setJsonApplied(false);
+    resetSend();
   };
 
   const handleClose = () => {
     const isDirty = generatedJson || getChanges().length > 0;
-    if (isDirty && !confirm("discard unsaved changes?")) return;
+    if (isDirty && txState !== "success" && !confirm("discard unsaved changes?")) return;
     onClose();
   };
 
@@ -419,6 +516,182 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
     );
   };
 
+  // fee estimate (reactive)
+  const feeEstimate = estimateTransactionFee(DEFAULT_COMPUTE_UNITS, priorityFee);
+
+  // check for new creators (compared to on-chain)
+  const hasNewCreators = creators.some((fc) => {
+    if (!onChainMeta?.creators) return creators.length > 0;
+    return !onChainMeta.creators.find((oc) => oc.address === fc.address);
+  });
+
+  // check for seller fee change
+  const sellerFeeChanged =
+    onChainMeta != null &&
+    sellerFeeBasisPoints !== onChainMeta.sellerFeeBasisPoints;
+
+  // -----------------------------------------------------------------
+  // Transaction handler
+  // -----------------------------------------------------------------
+
+  const handleUpdateOnChain = async () => {
+    // Pre-transaction validation
+    const issues = runPreTransactionValidation();
+    if (issues.length > 0) {
+      setTxError({
+        kind: "unknown",
+        message: "Validation failed",
+        details: issues.join("; "),
+      });
+      setTxState("error");
+      return;
+    }
+
+    try {
+      // Phase 1: Fetch on-chain metadata
+      setTxState("preparing");
+      setTxError(null);
+      setTxSignature(null);
+
+      console.log("[MetadataEditor] Fetching on-chain metadata...");
+      const onChain = await fetchOnChainMetadata(nft.mint, rpcEndpoint);
+      setOnChainMeta(onChain);
+
+      // Validate immutability
+      if (!onChain.isMutable) {
+        setTxError({
+          kind: "immutable",
+          message: "This NFT is immutable — updates will fail",
+        });
+        setTxState("error");
+        return;
+      }
+
+      // Validate update authority
+      if (onChain.updateAuthority !== walletAddress) {
+        setTxError({
+          kind: "invalid-authority",
+          message: `You are not the update authority for this NFT. Authority is ${onChain.updateAuthority.slice(0, 8)}...`,
+        });
+        setTxState("error");
+        return;
+      }
+
+      // Phase 2: Build instruction
+      console.log("[MetadataEditor] Building instruction...");
+      const metadataPda = await deriveMetadataPDA(nft.mint);
+
+      // Merge creators: preserve on-chain verified status
+      const mergedCreators =
+        creators.length > 0
+          ? mergeCreators(creators, onChain.creators)
+          : onChain.creators;
+
+      const instruction = buildUpdateMetadataV2Instruction(
+        metadataPda,
+        walletAddress!,
+        {
+          name,
+          symbol,
+          uri: newUri,
+          sellerFeeBasisPoints,
+          creators: mergedCreators,
+          collection: onChain.collection,
+          uses: onChain.uses,
+        }
+      );
+
+      // Phase 3: Sign and send
+      setTxState("signing");
+      console.log("[MetadataEditor] Requesting wallet signature...");
+
+      const signature = await send(
+        {
+          instructions: [instruction],
+          computeUnitLimit: DEFAULT_COMPUTE_UNITS,
+          computeUnitPrice: BigInt(priorityFee),
+        },
+        {
+          skipPreflight,
+          commitment,
+        }
+      );
+
+      const sigString = String(signature);
+      console.log("[MetadataEditor] Transaction sent:", sigString);
+
+      // Phase 4: Confirm
+      setTxState("confirming");
+      setTxSignature(sigString);
+
+      const confirmResult = await pollConfirmation(
+        sigString,
+        rpcEndpoint,
+        commitment,
+        CONFIRMATION_TIMEOUT_MS,
+        CONFIRMATION_POLL_MS
+      );
+
+      if (confirmResult.confirmed) {
+        setTxState("success");
+        console.log("[MetadataEditor] Transaction confirmed!");
+
+        // Save to history
+        const entry: TransactionHistoryEntry = {
+          nftName: name,
+          mint: nft.mint,
+          signature: sigString,
+          timestamp: new Date().toISOString(),
+          network: customRpcInUse ? "custom" : network,
+        };
+        addTransactionToHistory(entry);
+        setTxHistory(getTransactionHistory());
+
+        // Mark JSON as applied
+        setJsonApplied(true);
+
+        // Clear the new URI
+        setNewUri("");
+
+        // Trigger gallery refresh
+        if (onRefresh) {
+          setTimeout(() => onRefresh(), 2000);
+        }
+      } else if (confirmResult.err === "timeout") {
+        setTxState("success"); // optimistic — tx was sent
+        setTxError({
+          kind: "timeout",
+          message:
+            "Transaction sent but confirmation timed out. It may still succeed — check explorer.",
+        });
+      } else {
+        setTxState("error");
+        setTxError({
+          kind: "unknown",
+          message: "Transaction failed on-chain",
+          details: confirmResult.err || undefined,
+        });
+      }
+    } catch (err) {
+      console.error("[MetadataEditor] Transaction error:", err);
+      const classified = classifyTransactionError(err);
+      setTxError(classified);
+      setTxState("error");
+      resetSend();
+    }
+  };
+
+  const handleRetry = () => {
+    setTxState("idle");
+    setTxError(null);
+    setTxSignature(null);
+    resetSend();
+  };
+
+  // -----------------------------------------------------------------
+  // Render
+  // -----------------------------------------------------------------
+
   if (loading) {
     return (
       <div className="border border-foreground/20 p-6">
@@ -430,6 +703,26 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
   }
 
   const changes = getChanges();
+  const preIssues = generatedJson && newUri ? runPreTransactionValidation() : [];
+  const explorerUrl = txSignature ? getExplorerUrl(txSignature, network) : null;
+
+  // Button label based on transaction state
+  const txButtonLabel = {
+    idle: "update nft metadata",
+    preparing: "preparing...",
+    signing: "sign in wallet...",
+    confirming: "confirming...",
+    success: "update nft metadata",
+    error: "update nft metadata",
+  }[txState];
+
+  const txButtonDisabled =
+    !newUri ||
+    preIssues.length > 0 ||
+    txState === "preparing" ||
+    txState === "signing" ||
+    txState === "confirming" ||
+    isSending;
 
   return (
     <div className="border border-foreground/20 p-6">
@@ -654,6 +947,11 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
               {errors.sellerFeeBasisPoints}
             </p>
           )}
+          {sellerFeeChanged && (
+            <p className="text-xs text-foreground/40 mt-1">
+              royalty changes apply to future sales
+            </p>
+          )}
         </div>
 
         {/* creators */}
@@ -733,6 +1031,13 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
                 </span>
               )}
             </div>
+          )}
+
+          {hasNewCreators && (
+            <p className="text-xs text-foreground/40 mt-2">
+              new creators must sign separately to become verified.
+              existing creators keep their verified status.
+            </p>
           )}
         </div>
       </div>
@@ -814,6 +1119,11 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
 
         {generatedJson && (
           <div>
+            {jsonApplied && (
+              <p className="text-xs text-green-600 mb-2">
+                ✓ applied successfully
+              </p>
+            )}
             <textarea
               value={jsonManualText}
               onChange={(e) => handleJsonManualChange(e.target.value)}
@@ -847,7 +1157,7 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
         )}
       </div>
 
-      {/* section 7: new URI + transaction preview */}
+      {/* section 7: new URI + transaction */}
       {generatedJson && (
         <div className="mb-6">
           <h3 className="text-sm font-medium mb-2">update on-chain uri</h3>
@@ -858,11 +1168,19 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
           <input
             type="text"
             value={newUri}
-            onChange={(e) => setNewUri(e.target.value)}
+            onChange={(e) => {
+              setNewUri(e.target.value);
+              // Reset transaction state when URI changes
+              if (txState === "error" || txState === "success") {
+                setTxState("idle");
+                setTxError(null);
+              }
+            }}
             placeholder="new metadata uri (https://, ipfs://, ar://)"
             className="w-full border border-foreground/20 px-3 py-1.5 text-sm bg-transparent outline-none focus:border-foreground/40 mb-3"
           />
 
+          {/* transaction preview */}
           {newUri && (
             <div className="border border-foreground/10 p-3 mb-3">
               <p className="text-xs font-medium mb-1">transaction preview</p>
@@ -870,27 +1188,250 @@ export function MetadataEditor({ nft, onClose }: MetadataEditorProps) {
                 mint: {nft.mint}
               </p>
               <p className="text-xs font-mono text-foreground/50">
+                name: {name}
+              </p>
+              <p className="text-xs font-mono text-foreground/50">
+                symbol: {symbol}
+              </p>
+              <p className="text-xs font-mono text-foreground/50">
                 uri: {nft.uri || "(empty)"} &rarr; {newUri}
               </p>
-              <p className="text-xs text-foreground/40 mt-2">
-                estimated cost: ~0.000005 SOL (transaction fee)
+              <p className="text-xs font-mono text-foreground/50">
+                seller fee: {sellerFeeBasisPoints} ({(sellerFeeBasisPoints / 100).toFixed(2)}%)
+              </p>
+              {creators.length > 0 && (
+                <p className="text-xs font-mono text-foreground/50">
+                  creators: {creators.length} ({creators.map(c => `${c.address.slice(0, 4)}...${c.share}%`).join(", ")})
+                </p>
+              )}
+              <div className="mt-2 pt-2 border-t border-foreground/5">
+                <p className="text-xs text-foreground/40">
+                  estimated cost: ~{feeEstimate.totalSol} SOL
+                </p>
+                <p className="text-xs text-foreground/30">
+                  base fee: {feeEstimate.baseFee} lamports + priority fee: {feeEstimate.priorityFee} lamports
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* immutability warning */}
+          {onChainMeta && !onChainMeta.isMutable && (
+            <div className="border border-red-500/30 bg-red-500/5 p-3 mb-3">
+              <p className="text-xs text-red-500">
+                this NFT is immutable — metadata updates will fail
               </p>
             </div>
           )}
 
+          {/* pre-transaction validation errors */}
+          {preIssues.length > 0 && (
+            <div className="mb-3">
+              {preIssues.map((issue, i) => (
+                <p key={i} className="text-xs text-red-500/70">
+                  {issue}
+                </p>
+              ))}
+            </div>
+          )}
+
+          {/* advanced options */}
+          <div className="mb-3">
+            <button
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="text-xs text-foreground/40 hover:opacity-70"
+            >
+              {showAdvanced ? "hide" : "show"} advanced transaction options
+            </button>
+
+            {showAdvanced && (
+              <div className="mt-2 p-3 border border-foreground/10 flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-foreground/50 w-40">
+                    priority fee (micro-lamports)
+                  </label>
+                  <input
+                    type="number"
+                    value={priorityFee}
+                    onChange={(e) =>
+                      setPriorityFee(Math.max(0, parseInt(e.target.value) || 0))
+                    }
+                    min={0}
+                    className="w-28 border border-foreground/20 px-2 py-1 text-xs bg-transparent outline-none focus:border-foreground/40"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-foreground/50 w-40">
+                    skip preflight checks
+                  </label>
+                  <input
+                    type="checkbox"
+                    checked={skipPreflight}
+                    onChange={(e) => setSkipPreflight(e.target.checked)}
+                    className="accent-foreground/60"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-xs text-foreground/50 w-40">
+                    commitment level
+                  </label>
+                  <select
+                    value={commitment}
+                    onChange={(e) =>
+                      setCommitment(e.target.value as "confirmed" | "finalized")
+                    }
+                    className="border border-foreground/20 px-2 py-1 text-xs bg-transparent outline-none"
+                  >
+                    <option value="confirmed">confirmed</option>
+                    <option value="finalized">finalized</option>
+                  </select>
+                </div>
+                <p className="text-xs text-foreground/30">
+                  compute unit limit: {DEFAULT_COMPUTE_UNITS.toLocaleString()} (fixed)
+                </p>
+              </div>
+            )}
+          </div>
+
+          {/* transaction button */}
           <button
-            disabled={!newUri}
+            onClick={handleUpdateOnChain}
+            disabled={txButtonDisabled}
             className="border border-foreground/20 px-4 py-1.5 text-sm hover:opacity-70 disabled:opacity-30 disabled:cursor-not-allowed"
           >
-            update nft metadata
+            {(txState === "preparing" || txState === "signing" || txState === "confirming") && (
+              <span className="inline-block w-3 h-3 border border-foreground/40 border-t-transparent rounded-full animate-spin mr-2 align-middle" />
+            )}
+            {txButtonLabel}
           </button>
-          <p className="text-xs text-foreground/30 mt-1">
-            transaction signing will be implemented in a future update
-          </p>
+
+          {/* transaction state messages */}
+          {txState === "preparing" && (
+            <p className="text-xs text-foreground/50 mt-2">
+              fetching on-chain metadata and building transaction...
+            </p>
+          )}
+          {txState === "signing" && (
+            <p className="text-xs text-foreground/50 mt-2">
+              waiting for wallet approval...
+            </p>
+          )}
+          {txState === "confirming" && (
+            <p className="text-xs text-foreground/50 mt-2">
+              transaction submitted, waiting for confirmation...
+            </p>
+          )}
+
+          {/* success state */}
+          {txState === "success" && txSignature && (
+            <div className="mt-3 border border-green-600/30 bg-green-600/5 p-3">
+              <p className="text-xs text-green-600 font-medium mb-2">
+                NFT metadata updated successfully!
+              </p>
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-foreground/40">signature:</span>
+                <CopyText
+                  text={txSignature}
+                  className="font-mono text-foreground/60 truncate"
+                />
+              </div>
+              {explorerUrl && (
+                <a
+                  href={explorerUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-foreground/50 underline hover:opacity-70 mt-1 block"
+                >
+                  view on explorer
+                </a>
+              )}
+              {txError?.kind === "timeout" && (
+                <p className="text-xs text-yellow-600 mt-2">
+                  {txError.message}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* error state */}
+          {txState === "error" && txError && (
+            <div className="mt-3 border border-red-500/30 bg-red-500/5 p-3">
+              <p className="text-xs text-red-500 font-medium">
+                {txError.message}
+              </p>
+              {txError.details && (
+                <p className="text-xs text-red-500/60 mt-1 font-mono break-all">
+                  {txError.details}
+                </p>
+              )}
+              {txError.kind === "rejected" && (
+                <button
+                  onClick={handleRetry}
+                  className="text-xs text-foreground/50 underline hover:opacity-70 mt-2"
+                >
+                  try again
+                </button>
+              )}
+              {txError.kind !== "immutable" && txError.kind !== "invalid-authority" && txError.kind !== "rejected" && (
+                <button
+                  onClick={handleRetry}
+                  className="text-xs text-foreground/50 underline hover:opacity-70 mt-2"
+                >
+                  retry
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
 
-      {/* section 8: reset / cancel */}
+      {/* section 8: recent updates */}
+      {txHistory.length > 0 && (
+        <div className="mb-6">
+          <button
+            onClick={() => setShowHistory(!showHistory)}
+            className="text-xs text-foreground/40 hover:opacity-70"
+          >
+            {showHistory ? "hide" : "show"} recent updates ({txHistory.length})
+          </button>
+          {showHistory && (
+            <div className="mt-2 border border-foreground/10 p-3">
+              {txHistory.map((entry, i) => {
+                const entryUrl = getExplorerUrl(entry.signature, entry.network === "custom" ? "custom" : entry.network);
+                return (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 text-xs py-1 border-b border-foreground/5 last:border-0"
+                  >
+                    <span className="text-foreground/40 w-36 shrink-0">
+                      {new Date(entry.timestamp).toLocaleString()}
+                    </span>
+                    <span className="text-foreground/60 truncate flex-1">
+                      {entry.nftName}
+                    </span>
+                    <CopyText
+                      text={entry.signature}
+                      className="font-mono text-foreground/40 w-20 truncate"
+                    />
+                    {entryUrl && (
+                      <a
+                        href={entryUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-foreground/40 underline hover:opacity-70 shrink-0"
+                      >
+                        explorer
+                      </a>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* section 9: reset / cancel */}
       <div className="flex gap-2 pt-4 border-t border-foreground/10">
         {originalJson && (
           <button

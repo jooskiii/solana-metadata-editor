@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import {
   fetchNFTsViaDAS,
   isDASUnsupported,
@@ -26,7 +26,10 @@ export function useNFTsByUpdateAuthority(
     total: 0,
   });
   const [error, setError] = useState<string | null>(null);
+  const [refreshCounter, setRefreshCounter] = useState(0);
   const abortRef = useRef<AbortController | null>(null);
+
+  const refresh = useCallback(() => setRefreshCounter((c) => c + 1), []);
 
   useEffect(() => {
     if (!address) {
@@ -113,7 +116,7 @@ export function useNFTsByUpdateAuthority(
     return () => {
       controller.abort();
     };
-  }, [address, rpcEndpoint]);
+  }, [address, rpcEndpoint, refreshCounter]);
 
-  return { nfts, loading, loadingOffChain, offChainProgress, error };
+  return { nfts, loading, loadingOffChain, offChainProgress, error, refresh };
 }
